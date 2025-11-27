@@ -2,7 +2,7 @@
 
 > **Project:** OkRx Salesforce Connector (AppExchange Managed Package)  
 > **Version:** 5.1 (PSP Scenario & Traversal)  
-> 🖥️ **UI Prototype:** [**Launch Interactive Demo**](https://gemini.google.com/share/f7707f50cf78)
+> 🖥️ **UI Prototype:** <a href="https://gemini.google.com/share/f7707f50cf78" target="_blank">Launch Interactive Demo</a>
 
 ## 1. Executive Summary
 
