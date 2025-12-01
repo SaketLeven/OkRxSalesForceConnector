@@ -275,20 +275,40 @@ Clients have flexibility in how they deploy these:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> NoSession: User Loads Record Page
+    [*] --> CheckSession: User Loads Record Page
     
-    NoSession --> StartFormVisible: okrxStartForm Component Checks Session
-    StartFormVisible --> UserClicksStart: Button Enabled: "Start Form"
-    UserClicksStart --> CreateSession: User Completes Interceptor Modal
-    CreateSession --> CallAPI: POST /requests/create
-    CallAPI --> SaveGUID: API Returns FormInstanceGuid
-    SaveGUID --> SessionExists: Insert OkRx_Form_Session__c
-    
-    SessionExists --> ViewFormVisible: okrxViewForm Component Checks Session
-    ViewFormVisible --> UserClicksView: Button Enabled: "View Form"
-    UserClicksView --> FetchURL: GET /FormInstance/getUrl
-    FetchURL --> OpenURL: API Returns Fresh URL
-    OpenURL --> [*]: Redirect to OkRx Portal
+    state "Start Form Flow (No Session)" as StartFlow {
+        CheckSession --> StartVisible: No OkRx_Form_Session__c Found
+        StartVisible --> ResolveProfile: User Clicks "Start Form"
+        
+        %% Challenge 3: Dynamic Config Resolution
+        ResolveProfile --> FetchData: Read OkRx_Mapping_Profile__mdt
+        
+        %% Challenge 1: Search Endpoint Logic
+        FetchData --> InterceptorModal: Fetch DINs & Active Insurers
+        
+        InterceptorModal --> ResolveAuth: User Selects Form & Confirms
+        
+        %% Challenge 5: Dynamic Authentication
+        ResolveAuth --> CallCreateAPI: Map Program to Named Credential
+        
+        %% Challenge 2: Create Endpoint
+        CallCreateAPI --> SaveGUID: POST /requests/create
+        
+        %% Challenge 4: Persistence
+        SaveGUID --> RefreshUI: Insert OkRx_Form_Session__c
+    }
+
+    state "View Form Flow (Session Exists)" as ViewFlow {
+        CheckSession --> ViewVisible: Session Record Found
+        RefreshUI --> ViewVisible: Component State Update
+        ViewVisible --> FetchFreshURL: User Clicks "View Form"
+        
+        %% Challenge 4: No URL Storage (Always Fetch Fresh)
+        FetchFreshURL --> Redirect: GET /FormInstance/getUrl
+    }
+
+    Redirect --> [*]: Open OkRx Portal (New Tab)
 ```
 
 **Apex Controllers:**
