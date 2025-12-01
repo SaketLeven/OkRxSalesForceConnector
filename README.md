@@ -28,7 +28,7 @@ Historically, integrating OkRx required custom code for every client. This Manag
 
 We have identified 5 critical challenges due to the variability of client data. The architecture solves them as follows:
 
-### Challenge 1: Dynamic Context & Data Relevance (Filtering)
+### Challenge 1: Search Endpoint
 
 **The Problem:**
 Fetching data is not enough; we must fetch the right data from complex data models.
@@ -44,7 +44,7 @@ Fetching data is not enough; we must fetch the right data from complex data mode
 We extend the Collection Mapping strategy to include Relationship Traversal and a Filtering Engine.
 
 1.  **Metadata Definition (The "Brain"):**
-    The Admin creates a profile named `PSP_PriorAuth_Launch` which is for the process of launching from a PA record.
+    The Admin creates a configuration named `PSP_PriorAuth_Launch` which is for the process of launching from a PA record.
 
 2.  **Field Mapping Strategy (With Filters & Traversal):**
     We update the Metadata Schema to include a `Collection_Filter_Clause__c` and support relationship paths.
@@ -61,10 +61,15 @@ We extend the Collection Mapping strategy to include Relationship Traversal and 
         *   **Field Map:** `InsurerName` -> `Insurer_Company_Name__c`
         *   **Filter:** `Status__c = 'Active'`
         *   **Result:** The engine fetches only the active insurance policies for that patient, ignoring expired ones.
+    
+    *   **FormType Configuration:**
+        *   **Type:** Text-based Mapping
+        *   **Purpose:** Supply values like `PRIORAUTH`, `ENROLMENT`, etc. based on Salesforce data.
+        *   **Logic:** Similar to the Authentication mapping, we can map specific field values or record types to the required FormType string.
 
 3.  **Runtime Execution Flow:**
     *   **User Action:** User clicks button on `Prior_Authorization__c`.
-    *   **Step 1 (Context Fetch):** The Apex engine queries the Root Object to get direct fields and Parent IDs.
+    *   **Step 1 (Context Fetch):** The engine queries the Root Object to get direct fields and Parent IDs.
         ```sql
         SELECT Selected_Prescription__r.DIN__c, Patient__c
         FROM Prior_Authorization__c
@@ -79,7 +84,7 @@ We extend the Collection Mapping strategy to include Relationship Traversal and 
         ```
     *   **Validation:** If the patient has no active insurers found via that path, the UI alerts the user.
 
-### Challenge 2: The "Create Request" Complexity (1-to-Many Relationships)
+### Challenge 2: Create Endpoint
 
 > **Context:** The `/requests/create` endpoint requires deep data (Patient, Address, Payer). If a patient has multiple addresses or insurance policies, the app cannot guess which one to send.
 
@@ -90,103 +95,9 @@ The `/requests/create` endpoint requires a deep, specific JSON payload (Patient,
 1.  **1-to-Many Ambiguity:** A Patient might have 3 Addresses or 5 Insurance Policies. The API requires exactly one. The app cannot "guess" which one to send without risking claim rejection.
 2.  **Messy Data:** Salesforce records often lack fields required by the API (e.g., a missing `Date of Birth` or `Postal Code`).
 
-#### The Solution: The Interceptor Modal
+#### The Solution: Direct Mapping (Skipping Interceptor)
 
-We introduce a mandatory **"Pre-flight" Modal** that sits between the Form Selection and the API Submission. This UI serves three critical functions:
-
-##### 1. Disambiguation (The 1-to-Many Solver)
-
-**The Logic:**
-When the Apex engine executes the "Step 2" query (e.g., fetching `Patient_Insurer__c` records), it may return multiple active results.
-*   **Apex Behavior:** The controller returns the *entire list* of found records to the LWC.
-*   **LWC Behavior:** The Interceptor UI detects `Insurers.length > 1` and renders a selection table.
-*   **Payload Construction:** The LWC takes the `Id` of the selected record to map the final JSON.
-
-**Visual Workflow:**
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant LWC as Interceptor UI
-    participant Apex as Apex Controller
-    participant DB as Salesforce DB
-
-    User->>LWC: Clicks "Start Form"
-    LWC->>Apex: fetchContextData(recordId)
-    Apex->>DB: Query Patient_Insurer__c (Status='Active')
-    DB-->>Apex: Returns [Insurer A, Insurer B]
-    Apex-->>LWC: Returns List<Patient_Insurer__c>
-    
-    rect rgb(255, 240, 240)
-    Note over LWC: Detection: List Size > 1
-    LWC->>LWC: Render Selection Table (Radio Buttons)
-    end
-    
-    User->>LWC: Selects "Insurer A"
-    User->>LWC: Clicks "Create Request"
-    LWC->>Apex: submitPayload(selectedInsurerId)
-```
-
-##### 2. The "Field Set" Strategy (Solving Display Context)
-
-**The Problem:**
-We cannot hardcode which columns to show in the selection table. *Client A* needs `Policy_Number__c`, while *Client B* needs `Group_ID__c`.
-
-**The Solution:**
-We leverage Salesforce **Field Sets** to delegate this configuration to the Client Admin.
-
-*   **Admin Configuration (XML Metadata):**
-    The Admin configures the `OkRx_Interceptor_Display` Field Set.
-    ```xml
-    <FieldSet xmlns="http://soap.sforce.com/2006/04/metadata">
-        <fullName>OkRx_Interceptor_Display</fullName>
-        <description>Fields to display in the Interceptor Modal table</description>
-        <displayedFields>
-            <field>Name</field>
-            <isFieldManaged>false</isFieldManaged>
-            <isRequired>false</isRequired>
-        </displayedFields>
-        <displayedFields>
-            <field>Policy_Number__c</field>
-            <isFieldManaged>false</isFieldManaged>
-            <isRequired>false</isRequired>
-        </displayedFields>
-        <label>OkRx Interceptor Display</label>
-    </FieldSet>
-    ```
-
-*   **Runtime Logic (LWC Controller):**
-    The LWC dynamically iterates the field set to render columns.
-    ```javascript
-    // LWC Controller Logic
-    @wire(getFieldSet, { objectName: 'Patient_Insurer__c', fieldSetName: 'OkRx_Interceptor_Display' })
-    wiredFields({ error, data }) {
-        if (data) {
-            this.columns = data.map(field => ({
-                label: field.label,
-                fieldName: field.fieldPath
-            }));
-        }
-    }
-    ```
-
-##### 3. The "Validation Gate" (Solving Messy Data)
-
-**The Problem:**
-The OkRx API requires specific fields (e.g., `Patient.DateOfBirth`) to be present. Salesforce records are often incomplete.
-
-**The Solution:**
-The Interceptor UI acts as a firewall.
-
-*   **Blocking Logic:**
-    *   If a required field is `null`, the "Submit" button is **Disabled**.
-    *   The UI renders the missing field as an **Editable Input** highlighted in **Red**.
-
-**User Correction Flow:**
-1.  User sees the red error.
-2.  User manually types the missing date.
-3.  The UI re-validates. If valid, the "Submit" button becomes **Enabled**.
-4.  **Important:** This corrected value is sent to the API but **NOT** saved back to Salesforce.
+For this version, we will proceed with a direct mapping approach where the system selects the primary or first available record based on the defined filters, skipping the manual disambiguation step for now.
 
 ### Challenge 3: Multiple Entry Points
 
@@ -205,7 +116,7 @@ We cannot ship a Managed Package with hardcoded logic for every possible object.
 
 #### The Solution: Agnostic Root Objects
 
-Our architecture uses **Dynamic Profile Resolution** to make the LWC and Apex completely object-agnostic. The component works on any record page by reading the `recordId` and looking up the configuration at runtime.
+Our architecture uses **Dynamic Button Configuration Resolution** to make the LWC and Apex completely object-agnostic. The component works on any record page by reading the `recordId` and looking up the configuration at runtime.
 
 ##### Mechanism 1: The "Object Agnostic" LWC
 
@@ -214,44 +125,18 @@ The Lightning Web Component implements `force:hasRecordId`, which automatically 
 
 **LWC Implementation:**
 
-```javascript
-// okrxFormLauncher.js
-import { LightningElement, api, wire } from 'lwc';
-import getProfileConfig from '@salesforce/apex/OkRxController.getProfileConfig';
-
-export default class OkrxFormLauncher extends LightningElement {
-    @api recordId;  // Automatically populated by Salesforce with the current record ID
-    @api profileName; // Design attribute: Admin configures this in App Builder
-    
-    profileConfig;
-    
-    @wire(getProfileConfig, { recordId: '$recordId', profileName: '$profileName' })
-    wiredProfile({ error, data }) {
-        if (data) {
-            this.profileConfig = data;
-            // Profile config contains: Root Object, Field Mappings, Query Paths
-        }
-    }
-    
-    handleStartForm() {
-        // LWC doesn't need to know what object this is
-        // It just passes the recordId to Apex
-    }
-}
-```
-
 **Key Points:**
 *   The LWC *never* hardcodes object names like `Prior_Authorization__c`.
 *   The `recordId` could be from *any* object in Salesforce.
-*   The component simply reads the `profileName` design attribute (set by the Admin in App Builder) and fetches the configuration.
+*   The component simply reads the `buttonConfigurationName` design attribute (set by the Admin in App Builder) and fetches the configuration.
 
-##### Mechanism 2: Dynamic Profile Resolution
+##### Mechanism 2: Dynamic Button Configuration Resolution
 
 **The Flow:**
 When the user clicks "Start Form", the system must determine:
 1.  What object is this `recordId` from?
-2.  What profile is configured for this context?
-3.  What data should be fetched based on that profile?
+2.  What button configuration is configured for this context?
+3.  What data should be fetched based on that configuration?
 
 **Visual Workflow:**
 
@@ -267,17 +152,17 @@ sequenceDiagram
     
     rect rgb(240, 248, 255)
     Note over LWC: recordId = "a0X3t000001YzP9EAK"
-    Note over LWC: profileName = "PSP_PriorAuth_Launch"
+    Note over LWC: buttonConfigurationName = "PSP_PriorAuth_Launch"
     end
     
-    LWC->>Apex: getProfileConfig(recordId, profileName)
+    LWC->>Apex: getProfileConfig(recordId, buttonConfigurationName)
     Apex->>Apex: Describe recordId.getSObjectType()
     
     rect rgb(255, 248, 220)
     Note over Apex: Detected Object: Prior_Authorization__c
     end
     
-    Apex->>Metadata: Query WHERE Profile_Name__c = 'PSP_PriorAuth_Launch'
+    Apex->>Metadata: Query WHERE Button_Configuration_Name__c = 'PSP_PriorAuth_Launch'
     Metadata-->>Apex: Returns Profile Config
     
     rect rgb(240, 255, 240)
@@ -293,33 +178,6 @@ sequenceDiagram
 
 **Apex Implementation:**
 
-```apex
-public class OkRxController {
-    @AuraEnabled(cacheable=true)
-    public static ProfileConfig getProfileConfig(String recordId, String profileName) {
-        // Step 1: Describe the record to get its object type
-        Id recId = (Id) recordId;
-        String objectName = recId.getSObjectType().getDescribe().getName();
-        
-        // Step 2: Query the Mapping Profile
-        OkRx_Mapping_Profile__mdt profile = [
-            SELECT Root_Object__c, DIN_Field_Path__c, Insurer_Relationship_Path__c
-            FROM OkRx_Mapping_Profile__mdt
-            WHERE Profile_Name__c = :profileName
-            AND Root_Object__c = :objectName
-            LIMIT 1
-        ];
-        
-        // Step 3: Validate the configuration matches the current record
-        if (profile.Root_Object__c != objectName) {
-            throw new AuraHandledException('Profile mismatch');
-        }
-        
-        return new ProfileConfig(profile);
-    }
-}
-```
-
 ##### Mechanism 3: The Dynamic Query Engine
 
 **The Challenge:**
@@ -327,58 +185,17 @@ After fetching the Profile configuration, the Apex engine must construct a SOQL 
 
 **Dynamic Query Construction:**
 
-```apex
-public class OkRxQueryBuilder {
-    public static Map<String, Object> fetchContextData(String recordId, OkRx_Mapping_Profile__mdt profile) {
-        // Step 1: Build the SELECT clause from Profile configuration
-        String dinPath = profile.DIN_Field_Path__c; // e.g., "Selected_Prescription__r.DIN__c"
-        String patientPath = profile.Patient_Relationship_Path__c; // e.g., "Patient__c"
-        
-        // Step 2: Construct the dynamic query
-        String query = 'SELECT ' + dinPath + ', ' + patientPath + 
-                       ' FROM ' + profile.Root_Object__c + 
-                       ' WHERE Id = :recordId';
-        
-        // Step 3: Execute
-        SObject record = Database.query(query);
-        
-        // Step 4: Extract the data using the same paths
-        String dinValue = (String) getNestedFieldValue(record, dinPath);
-        String patientId = (String) getNestedFieldValue(record, patientPath);
-        
-        return new Map<String, Object>{
-            'din' => dinValue,
-            'patientId' => patientId
-        };
-    }
-    
-    private static Object getNestedFieldValue(SObject record, String fieldPath) {
-        // Helper to traverse relationship paths like "Patient__r.Name"
-        List<String> parts = fieldPath.split('\\.');
-        Object currentValue = record;
-        
-        for (String part : parts) {
-            if (currentValue instanceof SObject) {
-                currentValue = ((SObject) currentValue).get(part);
-            }
-        }
-        
-        return currentValue;
-    }
-}
-```
-
 #### Admin Configuration
 
 **Setup Steps:**
 1.  Admin goes to **Setup** > **Custom Metadata Types** > **OkRx Mapping Profile**.
 2.  Clicks **New** and creates a profile:
-    *   **Profile Name:** `PSP_PriorAuth_Launch`
+    *   **Button Configuration Name:** `PSP_PriorAuth_Launch`
     *   **Root Object:** `Prior_Authorization__c`
     *   **DIN Field Path:** `Selected_Prescription__r.DIN__c`
     *   **Patient Relationship Path:** `Patient__c`
 3.  Admin places the `okrxFormLauncher` LWC on the `Prior_Authorization__c` Lightning Record Page.
-4.  In the **Lightning App Builder**, sets the component's `profileName` design attribute to `PSP_PriorAuth_Launch`.
+4.  In the **Lightning App Builder**, sets the component's `buttonConfigurationName` design attribute to `PSP_PriorAuth_Launch`.
 
 **Result:**
 The generic button now "knows" how to fetch data from `Prior_Authorization__c` without any custom code.
@@ -458,185 +275,23 @@ Clients have flexibility in how they deploy these:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> NoSession
-    note right of NoSession: User Loads Record Page
-
-    state "Check Session" as Check1
-    NoSession --> Check1: okrxStartForm
+    [*] --> NoSession: User Loads Record Page
     
-    Check1 --> UserClicksStart: Start Form Button Enabled
-    UserClicksStart --> CreateSession: Interceptor Modal
-    
-    CreateSession --> CallAPI
-    note right of CallAPI
-        POST /requests/create
-    end note
-
-    CallAPI --> SaveGUID
+    NoSession --> StartFormVisible: okrxStartForm Component Checks Session
+    StartFormVisible --> UserClicksStart: Button Enabled: "Start Form"
+    UserClicksStart --> CreateSession: User Completes Interceptor Modal
+    CreateSession --> CallAPI: POST /requests/create
+    CallAPI --> SaveGUID: API Returns FormInstanceGuid
     SaveGUID --> SessionExists: Insert OkRx_Form_Session__c
-
-    state "Check Session" as Check2
-    SessionExists --> Check2: okrxViewForm
-    Check2 --> UserClicksView: View Form Button Enabled
     
-    UserClicksView --> FetchURL
-    note right of FetchURL
-        GET /FormInstance/getUrl
-    end note
-
-    FetchURL --> OpenURL
-    OpenURL --> [*]: Redirect to Portal
-```
-
-**LWC: `okrxStartForm` Component:**
-
-```javascript
-// okrxStartForm.js
-import { LightningElement, api } from 'lwc';
-import checkExistingSession from '@salesforce/apex/OkRxSessionController.checkExistingSession';
-import createFormSession from '@salesforce/apex/OkRxSessionController.createFormSession';
-
-export default class OkrxStartForm extends LightningElement {
-    @api recordId;
-    @api profileName;
-    
-    isDisabled = false;
-    
-    connectedCallback() {
-        this.checkIfSessionExists();
-    }
-    
-    async checkIfSessionExists() {
-        try {
-            const session = await checkExistingSession({ parentRecordId: this.recordId });
-            
-            if (session) {
-                // Session already exists, disable the button
-                this.isDisabled = true;
-            }
-        } catch (error) {
-            console.error('Session check failed', error);
-        }
-    }
-    
-    handleStartForm() {
-        // Open Interceptor Modal
-        // After user completes modal and API returns FormInstanceGuid:
-        this.saveSession(formInstanceGuid);
-    }
-    
-    async saveSession(guid) {
-        try {
-            await createFormSession({
-                parentRecordId: this.recordId,
-                parentObjectName: this.getObjectName(),
-                formInstanceGuid: guid
-            });
-            
-            // Disable button after successful creation
-            this.isDisabled = true;
-        } catch (error) {
-            console.error('Failed to save session', error);
-        }
-    }
-}
-```
-
-**LWC: `okrxViewForm` Component:**
-
-```javascript
-// okrxViewForm.js
-import { LightningElement, api } from 'lwc';
-import checkExistingSession from '@salesforce/apex/OkRxSessionController.checkExistingSession';
-import getFormUrl from '@salesforce/apex/OkRxApiController.getFormUrl';
-
-export default class OkrxViewForm extends LightningElement {
-    @api recordId;
-    
-    existingSession;
-    isVisible = false;
-    
-    connectedCallback() {
-        this.checkForSession();
-    }
-    
-    async checkForSession() {
-        try {
-            this.existingSession = await checkExistingSession({ parentRecordId: this.recordId });
-            
-            if (this.existingSession) {
-                this.isVisible = true;
-            }
-        } catch (error) {
-            console.error('Session check failed', error);
-        }
-    }
-    
-    async handleViewForm() {
-        try {
-            // Always fetch fresh URL from OkRx API
-            const url = await getFormUrl({ formInstanceGuid: this.existingSession.FormInstanceGuid__c });
-            window.open(url, '_blank');
-        } catch (error) {
-            console.error('Failed to fetch form URL', error);
-        }
-    }
-}
+    SessionExists --> ViewFormVisible: okrxViewForm Component Checks Session
+    ViewFormVisible --> UserClicksView: Button Enabled: "View Form"
+    UserClicksView --> FetchURL: GET /FormInstance/getUrl
+    FetchURL --> OpenURL: API Returns Fresh URL
+    OpenURL --> [*]: Redirect to OkRx Portal
 ```
 
 **Apex Controllers:**
-
-```apex
-public class OkRxSessionController {
-    @AuraEnabled(cacheable=true)
-    public static OkRx_Form_Session__c checkExistingSession(String parentRecordId) {
-        List<OkRx_Form_Session__c> sessions = [
-            SELECT Id, FormInstanceGuid__c
-            FROM OkRx_Form_Session__c
-            WHERE Parent_Record_ID__c = :parentRecordId
-            LIMIT 1
-        ];
-        
-        return sessions.isEmpty() ? null : sessions[0];
-    }
-    
-    @AuraEnabled
-    public static OkRx_Form_Session__c createFormSession(
-        String parentRecordId, 
-        String parentObjectName,
-        String formInstanceGuid
-    ) {
-        OkRx_Form_Session__c session = new OkRx_Form_Session__c(
-            Parent_Record_ID__c = parentRecordId,
-            Parent_Object_Name__c = parentObjectName,
-            FormInstanceGuid__c = formInstanceGuid
-        );
-        
-        insert session;
-        return session;
-    }
-}
-
-public class OkRxApiController {
-    @AuraEnabled
-    public static String getFormUrl(String formInstanceGuid) {
-        // Call OkRx API: GET /FormInstance/getUrl?formInstanceGuid={guid}
-        HttpRequest req = new HttpRequest();
-        req.setEndpoint('callout:OkRx_API/FormInstance/getUrl?formInstanceGuid=' + formInstanceGuid);
-        req.setMethod('GET');
-        
-        Http http = new Http();
-        HttpResponse res = http.send(req);
-        
-        if (res.getStatusCode() == 200) {
-            Map<String, Object> result = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
-            return (String) result.get('url');
-        } else {
-            throw new AuraHandledException('Failed to fetch form URL: ' + res.getBody());
-        }
-    }
-}
-```
 
 ##### Runtime Workflow
 
@@ -722,7 +377,7 @@ sequenceDiagram
 *   **Risk:** N/A - This architecture eliminates this risk by always fetching fresh URLs from the OkRx API via `GET /FormInstance/getUrl`.
 *   **Benefit:** Users always get the latest form URL, even if OkRx changes their URL structure or implements URL rotation for security.
 
-### Challenge 5: Program-Based Authentication
+### Challenge 5: Authentication
 
 > **Context:** Different drugs (Programs) use different Client IDs and Secrets.
 
@@ -860,95 +515,7 @@ sequenceDiagram
 
 **Dynamic Credential Resolution:**
 
-```apex
-public class OkRxAuthResolver {
-    
-    /**
-     * Resolves the Named Credential for a given Program identifier
-     * @param programIdentifier The value from the Salesforce record (e.g., 'Rheumatology')
-     * @return The API name of the Named Credential to use
-     */
-    public static String resolveNamedCredential(String programIdentifier) {
-        if (String.isBlank(programIdentifier)) {
-            throw new OkRxException('Program identifier is required for authentication');
-        }
-        
-        // Query the mapping metadata
-        List<OkRx_Program_Auth__mdt> mappings = [
-            SELECT Named_Credential__c
-            FROM OkRx_Program_Auth__mdt
-            WHERE Program_Identifier__c = :programIdentifier
-            LIMIT 1
-        ];
-        
-        if (mappings.isEmpty()) {
-            throw new OkRxException('No authentication mapping found for Program: ' + programIdentifier);
-        }
-        
-        return mappings[0].Named_Credential__c;
-    }
-    
-    /**
-     * Builds the complete callout endpoint using the resolved Named Credential
-     * @param programIdentifier The Program identifier
-     * @param apiPath The API path (e.g., '/requests/create')
-     * @return The full callout URL
-     */
-    public static String buildCalloutEndpoint(String programIdentifier, String apiPath) {
-        String namedCredential = resolveNamedCredential(programIdentifier);
-        return 'callout:' + namedCredential + apiPath;
-    }
-}
-```
-
 **API Controller with Dynamic Authentication:**
-
-```apex
-public class OkRxApiController {
-    
-    @AuraEnabled
-    public static String createFormRequest(String recordId, String profileName) {
-        try {
-            // Step 1: Fetch the record and extract the Program field
-            OkRx_Mapping_Profile__mdt profile = getProfile(profileName);
-            String programFieldPath = profile.Program_Field_Path__c; // e.g., 'Program__c'
-            
-            String query = 'SELECT ' + programFieldPath + ' FROM ' + 
-                          profile.Root_Object__c + ' WHERE Id = :recordId';
-            SObject record = Database.query(query);
-            
-            String programIdentifier = (String) record.get(programFieldPath);
-            
-            // Step 2: Resolve the Named Credential
-            String endpoint = OkRxAuthResolver.buildCalloutEndpoint(
-                programIdentifier, 
-                '/requests/create'
-            );
-            
-            // Step 3: Make the API call
-            HttpRequest req = new HttpRequest();
-            req.setEndpoint(endpoint);
-            req.setMethod('POST');
-            req.setHeader('Content-Type', 'application/json');
-            req.setBody(buildRequestPayload(record, profile));
-            
-            Http http = new Http();
-            HttpResponse res = http.send(req);
-            
-            if (res.getStatusCode() == 200) {
-                Map<String, Object> result = (Map<String, Object>) 
-                    JSON.deserializeUntyped(res.getBody());
-                return (String) result.get('formInstanceGuid');
-            } else {
-                throw new OkRxException('API Error: ' + res.getBody());
-            }
-            
-        } catch (Exception e) {
-            throw new AuraHandledException(e.getMessage());
-        }
-    }
-}
-```
 
 ##### Admin Configuration
 
@@ -1001,49 +568,14 @@ public class OkRxApiController {
 
 ##### Testing Strategy
 
-**Unit Test Example:**
-
-```apex
-@isTest
-private class OkRxAuthResolverTest {
-    
-    @isTest
-    static void testResolveNamedCredential_Success() {
-        // Note: Custom Metadata cannot be inserted in tests
-        // This test assumes the metadata exists in the org
-        
-        String result = OkRxAuthResolver.resolveNamedCredential('Rheumatology');
-        System.assertEquals('OkRx_Rheumatology', result, 'Should resolve to correct Named Credential');
-    }
-    
-    @isTest
-    static void testResolveNamedCredential_NotFound() {
-        try {
-            OkRxAuthResolver.resolveNamedCredential('NonExistentProgram');
-            System.assert(false, 'Should have thrown exception');
-        } catch (OkRxException e) {
-            System.assert(e.getMessage().contains('No authentication mapping found'), 
-                         'Should throw mapping not found error');
-        }
-    }
-    
-    @isTest
-    static void testBuildCalloutEndpoint() {
-        String endpoint = OkRxAuthResolver.buildCalloutEndpoint('Rheumatology', '/requests/create');
-        System.assertEquals('callout:OkRx_Rheumatology/requests/create', endpoint, 
-                           'Should build correct callout URL');
-    }
-}
-```
-
 ## 4. Functional Specifications & API Logic
 
-### 4.1 Step 1: Search & Selection (The "Interceptor")
+### 4.1 Step 1: Search Endpoint
 
 **Trigger:** User clicks "Start Form".
 
 **Logic:**
-1.  **Resolve Profile:** LWC reads the "Profile Name".
+1.  **Resolve Configuration:** LWC reads the "Button Configuration Name".
 2.  **Fetch Data:** Apex executes the Filtered queries defined in Metadata.
 3.  **API Call:** `POST /forms/getByMultipleDinsAndInsurers`
 
@@ -1057,7 +589,7 @@ private class OkRxAuthResolverTest {
 
 **UI Render:** Display forms list.
 
-### 4.2 Step 2: Instance Creation (The "Deep Map")
+### 4.2 Step 2: Create Endpoint
 
 **Trigger:** User selects Form + Specific Insurer Record -> Click "Create".
 
