@@ -2,8 +2,8 @@
 
 > **Project:** OkRx Salesforce Connector (AppExchange Managed Package)  
 > **Version:** 5.1 (PSP Scenario & Traversal)  
-> 🖥️ **UI Prototype:** <a href="https://gemini.google.com/share/1fd4a3ed33f6" target="_blank">Launch Interactive Demo of Functionality</a>
-> 🖥️ **UI Prototype:** <a href="https://gemini.google.com/share/f431509584a8" target="_blank">Launch Interactive Demo of Mapping UI</a>
+> 🖥️ **UI Prototype:** <a href="https://gemini.google.com/share/a5dcbde039df" target="_blank">Launch Interactive Demo of Functionality</a>
+> 🖥️ **UI Prototype:** <a href="https://gemini.google.com/share/c3c52ca77d4d" target="_blank">Launch Interactive Demo of Mapping UI</a>
 
 ## 1. Executive Summary
 
@@ -385,15 +385,11 @@ sequenceDiagram
 *   **Risk:** User clicks "Start Form" twice before the first API call completes.
 *   **Mitigation:** Disable the button immediately after the first click. Use a spinner to indicate loading state.
 
-**2. Orphaned Sessions**
-*   **Risk:** User creates a form but never submits it. The session record remains forever.
-*   **Mitigation:** This is acceptable for audit purposes. The session record provides a history of form creation attempts. Optionally, implement a scheduled Apex batch job to archive sessions older than 90 days.
-
-**3. Deleted Parent Records**
+**2. Deleted Parent Records**
 *   **Risk:** User deletes the Case, but the session record remains.
 *   **Mitigation:** This is acceptable. Session records provide audit history. Optionally, add a custom trigger to cascade delete sessions when the parent is deleted (using `Parent_Record_ID__c` as the filter).
 
-**4. Stale Form URLs**
+**3. Stale Form URLs**
 *   **Risk:** N/A - This architecture eliminates this risk by always fetching fresh URLs from the OkRx API via `GET /FormInstance/getUrl`.
 *   **Benefit:** Users always get the latest form URL, even if OkRx changes their URL structure or implements URL rotation for security.
 
